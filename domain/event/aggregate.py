@@ -142,6 +142,10 @@ class Event(AggregateRoot):
         sales_end: date,
     ) -> TicketCategory:
         """Add a new ticket category to this event."""
+        if self.status in (EventStatus.CANCELLED, EventStatus.COMPLETED):
+            raise ValueError(
+                f"Cannot add a ticket category to a {self.status.value} event."
+            )
         if price.amount < Decimal("0"):
             raise ValueError("Ticket price cannot be negative.")
         if quota <= 0:
