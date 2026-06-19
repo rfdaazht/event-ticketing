@@ -50,6 +50,12 @@ class PayBookingHandler:
         if booking.customer_id != command.customer_id:
             raise ValueError("This booking does not belong to this customer.")
 
+        # Validate booking is still payable before charging the customer via the external gateway.
+        if booking.status.value != "pending_payment":
+            raise ValueError("Only a pending payment booking can be paid.")
+        if booking.is_payment_deadline_passed:
+            raise ValueError("Payment deadline has passed.")
+
         # Process payment via external gateway
         payment_result = self._payment_gateway.process_payment(
             booking_id=booking.id,
@@ -60,7 +66,7 @@ class PayBookingHandler:
         if not payment_result.success:
             raise ValueError(f"Payment failed: {payment_result.message}")
 
-        # Mark booking as paid — business rules enforced inside pay()
+        # Mark booking as paid, remaining business rules enforced inside pay()
         amount_paid = Money(command.amount_paid, command.currency)
         booking.pay(amount_paid)
         self._booking_repository.save(booking)
