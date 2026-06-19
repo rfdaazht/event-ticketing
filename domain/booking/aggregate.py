@@ -4,6 +4,7 @@ from uuid import UUID
 
 from domain.shared.base import AggregateRoot
 from domain.shared.value_objects import Money
+from domain.shared.domain_services import PricingService
 from domain.shared.events import (
     TicketReserved,
     BookingPaid,
@@ -12,6 +13,7 @@ from domain.shared.events import (
 from domain.booking.value_objects import BookingStatus
 
 PAYMENT_DEADLINE_MINUTES = 15
+REFUND_DEADLINE_DAYS = 3
 
 
 @dataclass(eq=False)
@@ -28,6 +30,7 @@ class Booking(AggregateRoot):
     total_price: Money = field(default=None)
     status: BookingStatus = field(default=BookingStatus.PENDING_PAYMENT)
     payment_deadline: datetime = field(default=None)
+    refund_deadline: datetime = field(default=None)
     created_at: datetime = field(default_factory=datetime.utcnow)
 
     # ─ Factory Method
@@ -44,13 +47,16 @@ class Booking(AggregateRoot):
         """
         The only valid way to create a new Booking.
         Enforces all business rules on creation.
+        Total price is calculated via PricingService, which also
+        applies the service fee (if any) on top of the subtotal.
         """
         if quantity <= 0:
             raise ValueError("Ticket quantity must be greater than zero.")
 
-        total_price = unit_price.multiply(quantity)
+        total_price = PricingService.calculate_total(unit_price, quantity)
         created_at = datetime.utcnow()
         payment_deadline = created_at + timedelta(minutes=PAYMENT_DEADLINE_MINUTES)
+        refund_deadline = created_at + timedelta(days=REFUND_DEADLINE_DAYS)
 
         booking = cls(
             customer_id=customer_id,
@@ -61,6 +67,7 @@ class Booking(AggregateRoot):
             total_price=total_price,
             status=BookingStatus.PENDING_PAYMENT,
             payment_deadline=payment_deadline,
+            refund_deadline=refund_deadline,
             created_at=created_at,
         )
 
@@ -78,6 +85,10 @@ class Booking(AggregateRoot):
     @property
     def is_payment_deadline_passed(self) -> bool:
         return datetime.utcnow() > self.payment_deadline
+
+    @property
+    def is_refund_deadline_passed(self) -> bool:
+        return datetime.utcnow() > self.refund_deadline
 
     # ─ Business Methods
 
