@@ -6,7 +6,12 @@ from uuid import uuid4
 from domain.shared.value_objects import Money
 from domain.event.aggregate import Event
 from domain.booking.aggregate import Booking
-from domain.ticket.aggregate import Ticket
+from domain.ticket.aggregate import (
+    Ticket,
+    TicketAlreadyCheckedInError,
+    TicketEventMismatchError,
+    TicketOutsideCheckInWindowError,
+)
 from domain.refund.aggregate import Refund
 
 
@@ -50,11 +55,11 @@ def make_booking(quantity=2) -> Booking:
     )
 
 
-def make_ticket() -> Ticket:
+def make_ticket(event_id=None) -> Ticket:
     return Ticket.issue(
         booking_id=uuid4(),
         customer_id=uuid4(),
-        event_id=uuid4(),
+        event_id=event_id or uuid4(),
         ticket_category_id=uuid4(),
     )
 
@@ -154,6 +159,19 @@ class TestTicketCategory:
                 sales_end=date(2025, 11, 30),
             )
 
+    def test_cannot_add_ticket_category_to_cancelled_event(self):
+        event, _ = make_event_with_category()
+        event.publish()
+        event.cancel()
+        with pytest.raises(ValueError, match="Cannot add a ticket category to a cancelled event"):
+            event.add_ticket_category(
+                name="Late Bird",
+                price=Money(Decimal("100000"), "IDR"),
+                quota=5,
+                sales_start=date(2025, 10, 1),
+                sales_end=date(2025, 11, 30),
+            )
+
 
 # ─ Booking Tests
 
@@ -162,7 +180,13 @@ class TestBookingCreation:
     def test_booking_created_successfully(self):
         booking = make_booking()
         assert booking.status.value == "pending_payment"
-        assert booking.total_price == Money(Decimal("300000"), "IDR")
+        # 2 x 150,000 = 300,000 subtotal + 5% service fee = 315,000
+        assert booking.total_price == Money(Decimal("315000"), "IDR")
+
+    def test_booking_total_price_includes_service_fee(self):
+        booking = make_booking(quantity=1)
+        # 1 x 150,000 = 150,000 subtotal + 5% service fee = 157,500
+        assert booking.total_price == Money(Decimal("157500"), "IDR")
 
     def test_booking_cannot_be_created_with_zero_quantity(self):
         with pytest.raises(ValueError, match="greater than zero"):
@@ -177,19 +201,25 @@ class TestBookingCreation:
         assert booking.payment_deadline is not None
         assert booking.payment_deadline > datetime.utcnow()
 
+    def test_booking_has_refund_deadline(self):
+        booking = make_booking()
+        assert booking.refund_deadline is not None
+        assert booking.refund_deadline > datetime.utcnow()
+        assert booking.is_refund_deadline_passed is False
+
 
 class TestBookingPayment:
 
     def test_booking_paid_successfully(self):
         booking = make_booking()
-        booking.pay(Money(Decimal("300000"), "IDR"))
+        booking.pay(Money(Decimal("315000"), "IDR"))
         assert booking.status.value == "paid"
 
     def test_booking_cannot_be_paid_after_deadline(self):
         booking = make_booking()
         booking.payment_deadline = datetime.utcnow() - timedelta(minutes=1)
         with pytest.raises(ValueError, match="Payment deadline has passed"):
-            booking.pay(Money(Decimal("300000"), "IDR"))
+            booking.pay(Money(Decimal("315000"), "IDR"))
 
     def test_booking_cannot_be_paid_with_incorrect_amount(self):
         booking = make_booking()
@@ -198,7 +228,7 @@ class TestBookingPayment:
 
     def test_paid_booking_cannot_expire(self):
         booking = make_booking()
-        booking.pay(Money(Decimal("300000"), "IDR"))
+        booking.pay(Money(Decimal("315000"), "IDR"))
         with pytest.raises(ValueError, match="paid booking cannot be expired"):
             booking.expire()
 
@@ -209,20 +239,77 @@ class TestTicketCheckIn:
 
     def test_ticket_checked_in_successfully(self):
         ticket = make_ticket()
-        ticket.check_in(gate_officer_id=uuid4(), event_id=ticket.event_id)
+        ticket.check_in(
+            gate_officer_id=uuid4(),
+            event_id=ticket.event_id,
+            event_start_date=date(2025, 12, 1),
+            event_end_date=date(2025, 12, 1),
+            now=datetime(2025, 12, 1, 10, 0),
+        )
         assert ticket.status.value == "checked_in"
 
     def test_checked_in_ticket_cannot_be_checked_in_again(self):
         ticket = make_ticket()
         officer_id = uuid4()
-        ticket.check_in(gate_officer_id=officer_id, event_id=ticket.event_id)
-        with pytest.raises(ValueError, match="already been checked in"):
-            ticket.check_in(gate_officer_id=officer_id, event_id=ticket.event_id)
+        ticket.check_in(
+            gate_officer_id=officer_id,
+            event_id=ticket.event_id,
+            event_start_date=date(2025, 12, 1),
+            event_end_date=date(2025, 12, 1),
+            now=datetime(2025, 12, 1, 10, 0),
+        )
+        with pytest.raises(TicketAlreadyCheckedInError, match="already been used"):
+            ticket.check_in(
+                gate_officer_id=officer_id,
+                event_id=ticket.event_id,
+                event_start_date=date(2025, 12, 1),
+                event_end_date=date(2025, 12, 1),
+                now=datetime(2025, 12, 1, 11, 0),
+            )
 
     def test_ticket_cannot_be_checked_in_for_wrong_event(self):
         ticket = make_ticket()
-        with pytest.raises(ValueError, match="does not belong to this event"):
-            ticket.check_in(gate_officer_id=uuid4(), event_id=uuid4())
+        with pytest.raises(TicketEventMismatchError, match="does not match the event"):
+            ticket.check_in(
+                gate_officer_id=uuid4(),
+                event_id=uuid4(),
+                event_start_date=date(2025, 12, 1),
+                event_end_date=date(2025, 12, 1),
+                now=datetime(2025, 12, 1, 10, 0),
+            )
+
+    def test_ticket_cannot_be_checked_in_before_event_day(self):
+        ticket = make_ticket()
+        with pytest.raises(TicketOutsideCheckInWindowError, match="allowed check-in time window"):
+            ticket.check_in(
+                gate_officer_id=uuid4(),
+                event_id=ticket.event_id,
+                event_start_date=date(2025, 12, 1),
+                event_end_date=date(2025, 12, 1),
+                now=datetime(2025, 11, 30, 10, 0),
+            )
+
+    def test_ticket_cannot_be_checked_in_after_event_ends(self):
+        ticket = make_ticket()
+        with pytest.raises(TicketOutsideCheckInWindowError, match="allowed check-in time window"):
+            ticket.check_in(
+                gate_officer_id=uuid4(),
+                event_id=ticket.event_id,
+                event_start_date=date(2025, 12, 1),
+                event_end_date=date(2025, 12, 1),
+                now=datetime(2025, 12, 2, 0, 1),
+            )
+
+    def test_ticket_can_be_checked_in_anywhere_within_multi_day_event(self):
+        ticket = make_ticket()
+        ticket.check_in(
+            gate_officer_id=uuid4(),
+            event_id=ticket.event_id,
+            event_start_date=date(2025, 12, 1),
+            event_end_date=date(2025, 12, 3),
+            now=datetime(2025, 12, 2, 9, 0),
+        )
+        assert ticket.status.value == "checked_in"
 
 
 # ─ Refund Tests
@@ -263,7 +350,13 @@ class TestRefund:
         We simulate it here directly.
         """
         ticket = make_ticket()
-        ticket.check_in(gate_officer_id=uuid4(), event_id=ticket.event_id)
+        ticket.check_in(
+            gate_officer_id=uuid4(),
+            event_id=ticket.event_id,
+            event_start_date=date(2025, 12, 1),
+            event_end_date=date(2025, 12, 1),
+            now=datetime(2025, 12, 1, 10, 0),
+        )
         assert ticket.is_checked_in is True
 
 
