@@ -1,10 +1,12 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from uuid import UUID, uuid4
 
 from domain.shared.base import AggregateRoot
 from domain.shared.events import TicketCheckedIn
 from domain.ticket.value_objects import TicketStatus
+
+CHECK_IN_WINDOW = timedelta(hours=0)
 
 
 def _generate_ticket_code() -> str:
@@ -14,6 +16,22 @@ def _generate_ticket_code() -> str:
     chars = string.ascii_uppercase + string.digits
     suffix = "".join(random.choices(chars, k=8))
     return f"TKT-{suffix}"
+
+
+class TicketAlreadyCheckedInError(ValueError):
+    """Raised when a ticket that was already checked in is scanned again."""
+
+
+class TicketCancelledError(ValueError):
+    """Raised when a cancelled ticket is scanned."""
+
+
+class TicketEventMismatchError(ValueError):
+    """Raised when a ticket is scanned at the wrong event's gate."""
+
+
+class TicketOutsideCheckInWindowError(ValueError):
+    """Raised when check-in is attempted outside the event's allowed time window."""
 
 
 @dataclass(eq=False)
@@ -57,22 +75,50 @@ class Ticket(AggregateRoot):
 
     # ─ Business Methods
 
-    def check_in(self, gate_officer_id: UUID, event_id: UUID) -> None:
+    def check_in(
+        self,
+        gate_officer_id: UUID,
+        event_id: UUID,
+        event_start_date: date,
+        event_end_date: date,
+        now: datetime = None,
+    ) -> None:
         """
         Validate and check in this ticket at the event gate.
-        Enforces all check-in business rules.
+        Enforces all check-in business rules, including US13's
+        requirement that check-in can only happen on the event day
+        or within the allowed check-in time window.
+
+        event_start_date / event_end_date come from the Event aggregate;
+        the caller (application layer) is responsible for loading them,
+        since Ticket does not hold a reference to Event's full state.
         """
         if self.event_id != event_id:
-            raise ValueError("This ticket does not belong to this event.")
+            raise TicketEventMismatchError(
+                "This ticket does not match the event."
+            )
         if self.status == TicketStatus.CHECKED_IN:
-            raise ValueError("This ticket has already been checked in.")
+            raise TicketAlreadyCheckedInError(
+                "This ticket has already been used."
+            )
         if self.status == TicketStatus.CANCELLED:
-            raise ValueError("This ticket has been cancelled.")
+            raise TicketCancelledError(
+                "This ticket has been cancelled."
+            )
         if self.status != TicketStatus.ACTIVE:
             raise ValueError("Only an active ticket can be checked in.")
 
+        now = now or datetime.utcnow()
+        window_start = datetime.combine(event_start_date, datetime.min.time()) - CHECK_IN_WINDOW
+        window_end = datetime.combine(event_end_date, datetime.max.time()) + CHECK_IN_WINDOW
+        if not (window_start <= now <= window_end):
+            raise TicketOutsideCheckInWindowError(
+                "Check-in is only allowed on the event day or within the "
+                "allowed check-in time window."
+            )
+
         self.status = TicketStatus.CHECKED_IN
-        self.checked_in_at = datetime.utcnow()
+        self.checked_in_at = now
         self.checked_in_by = gate_officer_id
 
         self._record_event(
