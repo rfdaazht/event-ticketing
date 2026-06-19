@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 from uuid import UUID
 
+from domain.event.value_objects import EventStatus
 from domain.refund.aggregate import Refund
 from domain.repositories.booking_repository import IBookingRepository
+from domain.repositories.event_repository import IEventRepository
 from domain.repositories.ticket_repository import ITicketRepository
 from domain.repositories.refund_repository import IRefundRepository
 
@@ -29,10 +31,12 @@ class RequestRefundHandler:
     def __init__(
         self,
         booking_repository: IBookingRepository,
+        event_repository: IEventRepository,
         ticket_repository: ITicketRepository,
         refund_repository: IRefundRepository,
     ) -> None:
         self._booking_repository = booking_repository
+        self._event_repository = event_repository
         self._ticket_repository = ticket_repository
         self._refund_repository = refund_repository
 
@@ -45,6 +49,12 @@ class RequestRefundHandler:
             raise ValueError("This booking does not belong to this customer.")
         if booking.status.value != "paid":
             raise ValueError("Refund can only be requested for a paid booking.")
+
+        # if the event has been cancelled, a refund is automatically allowed regardless of the refund deadline.
+        event = self._event_repository.find_by_id(booking.event_id)
+        event_is_cancelled = event is not None and event.status == EventStatus.CANCELLED
+        if not event_is_cancelled and booking.is_refund_deadline_passed:
+            raise ValueError("Refund deadline has passed.")
 
         # Rule: cannot request refund if any ticket is already checked in
         tickets = self._ticket_repository.find_by_booking(command.booking_id)
