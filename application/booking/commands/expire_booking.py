@@ -37,7 +37,11 @@ class ExpireBookingHandler:
         if booking is None:
             raise ValueError(f"Booking {command.booking_id} not found.")
 
-        # Release reserved quota back to ticket category
+        # Validate and mark booking as expired FIRST. If this raises
+        booking.expire()
+        self._booking_repository.save(booking)
+
+        # Only after the booking is confirmed expired, release its reserved quota back to the ticket category.
         event = self._event_repository.find_by_id(booking.event_id)
         if event is not None:
             for tc in event.ticket_categories:
@@ -46,9 +50,6 @@ class ExpireBookingHandler:
                     self._event_repository.save(event)
                     break
 
-        # Mark booking as expired
-        booking.expire()
-        self._booking_repository.save(booking)
         booking.pull_domain_events()
 
         return ExpireBookingResult(
