@@ -76,6 +76,7 @@ class PostgreSQLBookingRepository(IBookingRepository):
             total_price_currency=booking.total_price.currency,
             status=booking.status.value,
             payment_deadline=booking.payment_deadline,
+            refund_deadline=booking.refund_deadline,
             created_at=booking.created_at,
         )
 
@@ -99,6 +100,7 @@ class PostgreSQLBookingRepository(IBookingRepository):
             ),
             status=BookingStatus(model.status),
             payment_deadline=model.payment_deadline,
+            refund_deadline=model.refund_deadline,
             created_at=model.created_at,
         )
         return booking

@@ -78,6 +78,7 @@ class BookingModel(Base):
         String(50), nullable=False, default="pending_payment"
     )
     payment_deadline: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    refund_deadline: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow
     )
